@@ -1,0 +1,444 @@
+---
+title: "initial_viz"
+author: "Matthew Ross"
+date: "10/14/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(raster)
+library(tidyverse)
+library(dygraphs)
+library(sf)
+library(nhdplusTools)
+library(mapview)
+library(elevatr)
+library(xml2)
+library(rvest)
+library(lubridate)
+library(imputeTS)
+library(ggthemes)
+```
+
+
+# Just time series
+
+```{r}
+files <- list.files('data/oct', full.names = T)
+
+
+better_names <- tibble(
+  og_names = c(
+    'Date Time',
+    'DO (mg/L)',
+    '% sat',
+    'ORP (mV)',
+    'Specific Conductivity (µS/cm)',
+    'Temperature (C)',
+    'pH (pH)',
+    'Turbidity (NTU)',
+    'Depth (ft)'
+  ),
+  better_names = c(
+    'datetime',
+    'do_mg',
+    'dissolved oxygen',
+    'orp',
+    'salinity',
+    'temp',
+    'ph',
+    'turb',
+    'depth'
+  )
+)
+weird_html_reader <- function(file) {
+  raw_wrong <- read_html(file) %>%
+    html_node('table') %>%
+    html_table(., fill = T) %>%
+    slice(-1:-7)
+  
+  names <- raw_wrong %>%
+    slice(1) %>%
+    gather(key = 'key', value = 'og_names') %>%
+    mutate(og_names = ifelse(grepl('sat', og_names), '% sat', og_names)) %>%
+    left_join(better_names) %>%
+    select(-key)
+  
+  names(raw_wrong) <- names$better_names
+  
+  raw_right <- raw_wrong %>%
+    slice(-1) %>%
+    mutate_at(vars(-`datetime`), as.numeric) %>%
+    mutate(datetime = ymd_hms(datetime)) %>%
+    mutate(site=str_split_fixed(file,'_',3)[,2])
+}    
+
+oct <- map_dfr(files,weird_html_reader)
+
+rist_dist <- c(8.5,15,16.2,18.5,19.9)
+
+```
+
+
+
+
+```{r}
+full_seq <- tibble(datetime= seq(min(oct$datetime),
+                                 max(oct$datetime),by=15*60))  %>%
+  nest(data = everything())
+
+
+
+
+full_unfold <- tibble(site=unique(oct$site),
+                    full_time = rep(full_seq$data,length(site))) %>%
+  unnest(full_time)
+
+oct_clean <- oct %>%
+  mutate(depth_lead = lead(depth,1),
+         depth_rate = depth-depth_lead) %>%
+  filter(depth > 0 & depth < 10,
+         temp > 0) %>%
+  right_join(.,full_unfold,by=c('datetime','site')) %>%
+  gather(key='sensor',value='value',-site,-datetime) %>%
+  group_by(sensor,site) %>%
+  mutate(fill_value = na_interpolation(value,'linear')) %>%
+  mutate(fill_filter = 
+           signal::filter(signal::butter(2,1/5,type='low'),fill_value)) %>%
+  as_tibble() %>%
+  filter(day(datetime) >= 8 & day(datetime) < 13)
+
+summary(oct_clean)
+oct_depth <- oct_clean %>%
+  select(-value,-fill_value) %>%
+  spread(key='sensor',value='fill_filter') %>%
+  select(datetime,salinity,site) %>%
+  spread(key='site',value='salinity')
+
+dygraph(xts::xts(oct_depth %>% select(-datetime),order.by=oct_depth$datetime))
+```
+
+
+
+```{r}
+velocity <- 0.52*.3048*60 # m/minute
+
+rist_time <- c(0,(rist_dist*1000)/(velocity)/60) # Hours
+
+unique(oct_clean$site)
+
+site_time = tibble(site = c('Rist',
+                            'Legacy',
+                            'Timberline',
+                            'Prospect',
+                            'ELC',
+                            'Archery'),
+                   time = rist_time)
+
+
+oct_hour <- oct_clean %>%
+  mutate(hour = round_date(datetime,'hours')) %>%
+  group_by(hour,site,sensor) %>%
+  summarize(value = mean(fill_filter,na.rm=T))
+
+oct_hour_sc <- oct_clean %>%
+  inner_join(site_time) %>%
+  filter(sensor %in% c('depth','salinity','dissolved oxygen')) %>%
+  mutate(sensor = factor(sensor,levels=c('depth','salinity','dissolved oxygen'))) %>%
+  mutate(site = factor(site,levels=c('Rist','Legacy',
+                                     'Timberline','Prospect',
+                                     'ELC','Archery'))) %>%
+  mutate(jumptime = datetime+time*60*60) %>%
+  group_by(site,sensor) %>%
+  mutate(ristCounter = c(0,diff(datetime)) %>% cumsum(.)/60) %>%
+  filter(ristCounter >= time)
+
+
+
+
+
+times <- unique(oct_hour_sc$datetime) %>% sort()
+
+iseq = seq(1,length(times),by=1)
+
+times
+saveGIF({
+  for(i in iseq){
+    dat <- oct_hour_sc %>%
+      filter(datetime <= times[i])
+    precise_dat <- oct_hour_sc %>%
+      filter(datetime <= times[i]) %>%
+      arrange(desc(datetime)) %>%
+      group_by(site,sensor) %>%
+      slice(1)
+g1 <- ggplot(oct_hour_sc,aes(x=datetime,y=fill_value,color=site)) + 
+  geom_line(size=.1) + 
+  geom_line(size=3,color='white') +
+  geom_line(data=dat,size=1.1) + 
+  geom_point(data=precise_dat,size=10) + 
+  xlab('Date') + 
+  ylab('Sensor Recording') + 
+  theme_few(base_size=30) + 
+  scale_color_brewer(type='div',palette=3,direction=-1,name='') + 
+  facet_wrap(~sensor,scales='free',ncol=1) + 
+  theme(legend.position = 'none') + 
+  xlim(min(times),max(times)) 
+print(g1)
+  }
+},movie.name='test4.gif',interval=0.075,ani.width=1600,ani.height=900)
+
+```
+
+
+# Poudre river 
+
+Is cool
+
+## This guy
+
+Made a really cool viz [here](https://statnmap.com/2019-10-06-follow-moving-particle-trajectory-on-raster-with-rayshader/) 
+
+## I wanna 
+
+Make the same
+
+
+# The physical template
+
+## NHD flowline downloads
+
+Thanks David Blodgett, writer of nhdplustools
+
+```{r}
+
+
+poudre_outlet <-  st_sfc(st_point(c(-104.999820, 40.538851)), crs = 4326) 
+
+poudre_comid <- discover_nhdplus_id(poudre_outlet)
+
+poudre_lines <- navigate_nldi(list(featureSource = 'comid',
+                               featureID = poudre_comid),
+                               mode='UM',
+                               data_source = '')
+
+
+
+
+#Download the full set
+subset_nhdplus(comids=poudre_lines$nhdplus_comid,
+                              output_file = 'data/poudre.gpkg',
+               nhdplus_data = 'download')
+
+
+```
+
+
+## Clip to lower part of the canyon
+
+```{r}
+
+
+big_box <- st_bbox(c(xmin=-105.36,
+                   xmax=-104.984,
+                   ymax=40.732,
+                   ymin=40.522),crs=4326) %>%
+  st_as_sfc()
+
+
+sub_poudre <- poudre_lines[big_box,] %>%
+  st_transform(2163)
+
+
+
+sites <- st_read('data/sondes.kml') %>%
+  filter(Name != 'Manners Sonde (FC-existing)') %>%
+  mutate(Name = factor(Name,levels=c('Rist Canyon Rd (CSU)',
+                                     'Legacy (CSU)',
+                                     'Lincoln (In-situ)',
+                                     'Timberline (FC)',
+                                     'Prospect (FC)',
+                                     'ELC (CSU; online)',
+                                     'Archery Range (FC)',
+                                     'Fossil Creek (FC)')))
+
+
+mapview(sites,zcol='Name',col.regions=c('#1b7837','#7fbf7b','gray',
+                                        '#d9f0d3','#e7d4e8',
+                                        '#af8dc3','#762a83','gray'
+                                        ))
+
+
+
+subsub <- sub_poudre[sites %>% st_transform(2163) %>% st_bbox(),]
+
+mapview(subsub)
+```
+
+
+## Download raster data
+
+```{r}
+p_elev <- get_elev_raster(sub_poudre,z=8)
+
+e_sub <- crop(p_elev,(sub_poudre))
+
+```
+
+
+## Collapse poudre river to saingle flowline and sample it
+
+```{r}
+poudre_solo <- sub_poudre %>%
+  summarize()
+
+
+poudre_sample <- st_sample(poudre_solo$geometry,size=10,type='regular') %>%
+  st_sf() 
+
+
+mapview(poudre_sample)
+
+```
+
+
+## Copy amazing code
+
+This is the core innovation I'm copying from StatnMap, basically
+it reprojects an SF object into rayshader space. 
+
+```{r}
+zscale=40
+
+poudre_rays <- sf_proj_as_ray(e_sub,sf = poudre_sample,
+                              z_pos = maxValue(e_sub) + 10,
+                              zscale = zscale,crop=T)
+
+
+
+```
+
+## Setup the terrain scene
+
+```{r}
+library(rayshader)
+datamat <- t(as.matrix(e_sub))
+# Rayshade raster
+ambmat <- ambient_shade(datamat, zscale = zscale)
+raymat <- ray_shade(datamat, zscale = zscale, lambert = TRUE)
+
+# Create ray_image
+ray_image <- datamat %>%
+  sphere_shade(texture = "imhof4") %>%
+  add_shadow(raymat, max_darken = 0.5) %>%
+  add_shadow(ambmat, max_darken = 0.5)
+
+
+```
+
+
+
+## More copying (movie renderer)
+
+```{r}
+library(rgl)
+render_cropped_scene <- function(ray_image, datamat, position,
+                                 position_next,
+                                 window = 200,
+                                 zscale = 30, zoom = 0.4,
+                                 windowsize = c(1000, 1000)) {
+  # Create a window around point
+  bounds <- tibble(
+    Xmin = max(round(position)[1] - window, 0), # X
+    Xmax = min(round(position)[1] + window, dim(datamat)[1]),
+    Ymin_pos = max(round(position)[3] - window, -dim(datamat)[2]), # Y
+    Ymax_pos = min(round(position)[3] + window, 0),
+    Ymin_row = dim(datamat)[2] + Ymin_pos + 1,
+    Ymax_row = dim(datamat)[2] + Ymax_pos - 1
+  )
+
+  # Height of the block (min - 1/5 of total height) to correct z
+  # soliddepth <- min(datamat, na.rm = TRUE))/zscale)
+  one_5 <- (max(datamat, na.rm = TRUE) - min(datamat, na.rm = TRUE))/5
+  soliddepth <- (min(datamat, na.rm = TRUE) - one_5)/zscale
+  
+  # Calculate new position of the point on the cropped raster
+  position_bounds <- position %>% 
+    mutate(
+      X_ray = X_ray - bounds$Xmin + 1,
+      Y_2d = Y_ray - bounds$Ymin_pos + 1,
+      Y_ray = -1 * (Y_ray - bounds$Ymin_pos + 1),
+      Z_ray = Z_ray #/zscale
+    )
+
+  # Plot cropped 3D output
+  ray_image[bounds$Ymin_row:bounds$Ymax_row,bounds$Xmin:bounds$Xmax,] %>% 
+    plot_3d(
+      datamat[bounds$Xmin:bounds$Xmax, bounds$Ymin_row:bounds$Ymax_row],
+      zscale = zscale, windowsize = windowsize,
+      # soliddepth = -min(datamat, na.rm = TRUE)/zscale,
+      soliddepth = soliddepth,
+      water = TRUE, wateralpha = 0,
+      theta = -90, phi = 30, 
+      zoom = zoom, 
+      fov = 80)
+  
+  # Add point at position
+  spheres3d(position_bounds[,c("X_ray", "Z_ray", "Y_ray")],
+            color = "red", add = TRUE, lwd = 5, radius = 5,
+            alpha = 1)
+
+  if (!missing(position_next)) {
+    position_next_bounds <- position_next %>% 
+      mutate(
+        X_ray = X_ray - bounds$Xmin + 1,
+        Y_2d = Y_ray - bounds$Ymin_pos + 1,
+        Y_ray = -1 * (Y_ray - bounds$Ymin_pos + 1),
+        Z_ray = Z_ray
+      )
+    
+    # Add point at position
+    spheres3d(position_next_bounds[,c("X_ray", "Z_ray", "Y_ray")],
+              color = "blue", add = TRUE, lwd = 5, radius = 3,
+              alpha = 1)
+  }
+}
+
+path_gif <- file.path(extraWD, "film_follow_trajectory.gif")
+if (!file.exists(path_gif)) {
+  
+  # Number of frame = Number of points
+  n_frames <- length(poudre_rays$coords$coords)
+  savedir <- file.path(extraWD, "film_follow_trajectory")
+  if (!dir.exists(savedir)) {
+    dir.create(savedir, showWarnings = FALSE)
+  }
+  img_frames <- file.path(
+    savedir,
+    paste0("film_", formatC(seq_len(n_frames), width = 3, flag = "0"), ".png")
+  )
+  
+  # create all frames
+  for (i in seq_len(n_frames)) {
+    # i <- 20
+    position <- poudre_rays$coords$coords[[i]]
+    if (i < n_frames) {
+      position_next <- poudre_rays$coords$coords[[i + 1]]
+      render_cropped_scene(ray_image, datamat, position,
+                           position_next)
+    } else {
+      # Last one
+      render_cropped_scene(ray_image, datamat, position)
+    }
+    # Save img
+    rgl::snapshot3d(img_frames[i])
+    rgl::clear3d()
+  }
+  rgl::rgl.close()
+  
+  # Create gif
+  magick::image_write_gif(magick::image_read(img_frames), 
+                          path = path_gif, 
+                          delay = 6/n_frames)
+}
+```
+
