@@ -25,7 +25,7 @@ library(ggthemes)
 
 ```{r}
 files <- list.files('data/oct', full.names = T)
-
+files <- list.files("/Users/natalieschmer/Desktop/GitHub/sensors/Data/Nov17/nov17sensor/", full.names = T)
 
 better_names <- tibble(
   og_names = c(
@@ -73,7 +73,7 @@ weird_html_reader <- function(file) {
     mutate(site=str_split_fixed(file,'_',3)[,2])
 }    
 
-oct <- map_dfr(files,weird_html_reader)
+sensors <- map_dfr(files,weird_html_reader)
 
 rist_dist <- c(8.5,15,16.2,18.5,19.9)
 
@@ -83,30 +83,32 @@ rist_dist <- c(8.5,15,16.2,18.5,19.9)
 
 
 ```{r}
-full_seq <- tibble(datetime= seq(min(oct$datetime),
-                                 max(oct$datetime),by=15*60))  %>%
+full_seq <- tibble(datetime= seq(min(sensors$datetime),
+                                 max(sensors$datetime),by=15*60))  %>%
   nest(data = everything())
 
 
 
 
-full_unfold <- tibble(site=unique(oct$site),
+full_unfold <- tibble(site=unique(sensors$site),
                     full_time = rep(full_seq$data,length(site))) %>%
   unnest(full_time)
 
-oct_clean <- oct %>%
-  mutate(depth_lead = lead(depth,1),
-         depth_rate = depth-depth_lead) %>%
-  filter(depth > 0 & depth < 10,
-         temp > 0) %>%
+sensors_clean <- sensors %>%
+  mutate(depth_lead = lead(depth_ft,1),
+         depth_rate = depth_ft-depth_lead) %>%
+  filter(depth_ft > 0 & depth_ft < 10,
+         temp_c > 0) %>%
   right_join(.,full_unfold,by=c('datetime','site')) %>%
-  gather(key='sensor',value='value',-site,-datetime) %>%
-  group_by(sensor,site) %>%
-  mutate(fill_value = na_interpolation(value,'linear')) %>%
-  mutate(fill_filter = 
-           signal::filter(signal::butter(2,1/5,type='low'),fill_value)) %>%
-  as_tibble() %>%
-  filter(day(datetime) >= 8 & day(datetime) < 13)
+  gather(key='sensor',value='value',-site,-datetime) 
+
+s# %>%
+#   group_by(sensor,site) %>%
+#   mutate(fill_value = na_interpolation(value,'linear')) %>%
+#   mutate(fill_filter = 
+#            signal::filter(signal::butter(2,1/5,type='low'),fill_value)) %>%
+#   as_tibble() %>%
+#   filter(day(datetime) >= 8 & day(datetime) < 13)
 
 summary(oct_clean)
 oct_depth <- oct_clean %>%
